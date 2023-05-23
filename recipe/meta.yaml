@@ -79,7 +79,9 @@ test:
     - python test_bdist_conda_setup.py bdist_conda --help
 
 about:
-  home: https://github.com/conda/conda-build
+  home: https://conda.org
   license: BSD-3-Clause
   license_file: LICENSE
   summary: Canary release of conda-build
+  doc_url: https://conda.io/projects/conda-build/en/latest/
+  dev_url: https://github.com/conda/conda-build
