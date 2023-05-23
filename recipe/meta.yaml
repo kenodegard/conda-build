@@ -3,9 +3,11 @@ package:
   version: {{ GIT_DESCRIBE_TAG }}.{{ GIT_BUILD_STR }}
 
 source:
+  # WARNING: git_url ignores uncommitted code
   git_url: ../
 
 build:
+  script: python -m pip install . -vv
   entry_points:
     - conda-build = conda_build.cli.main_build:main
     - conda-convert = conda_build.cli.main_convert:main
@@ -22,7 +24,7 @@ requirements:
     - git
   host:
     - python
-    - setuptools
+    - pip
     - hatchling >=1.12.2
     - hatch-vcs >=0.2.0
   run:
