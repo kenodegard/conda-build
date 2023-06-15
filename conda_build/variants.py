@@ -8,17 +8,18 @@ import re
 import sys
 from collections import OrderedDict
 from copy import copy
+from functools import lru_cache
 from itertools import product
 
 import yaml
-from pkg_resources import parse_version
 
-from conda_build.conda_interface import cc_conda_build, memoized, string_types, subdir
+from conda_build.conda_interface import cc_conda_build, subdir
 from conda_build.utils import ensure_list, get_logger, islist, on_win, trim_empty_keys
+from conda_build.version import _parse as parse_version
 
 DEFAULT_VARIANTS = {
     "python": f"{sys.version_info.major}.{sys.version_info.minor}",
-    "numpy": "1.11",
+    "numpy": "1.22",
     # this one actually needs to be pretty specific.  The reason is that cpan skeleton uses the
     #    version to say what's in their standard library.
     "perl": "5.26.2",
@@ -28,7 +29,11 @@ DEFAULT_VARIANTS = {
     "pin_run_as_build": OrderedDict(python=OrderedDict(min_pin="x.x", max_pin="x.x")),
     "ignore_version": [],
     "ignore_build_only_deps": ["python", "numpy"],
-    "extend_keys": ["pin_run_as_build", "ignore_version", "ignore_build_only_deps"],
+    "extend_keys": [
+        "pin_run_as_build",
+        "ignore_version",
+        "ignore_build_only_deps",
+    ],
     "cran_mirror": "https://cran.r-project.org",
 }
 
@@ -85,7 +90,7 @@ SUFFIX_MAP = {
 }
 
 
-@memoized
+@lru_cache(maxsize=None)
 def _get_default_compilers(platform, py_ver):
     compilers = DEFAULT_COMPILERS[platform].copy()
     if platform == "win":
@@ -119,11 +124,11 @@ def get_default_variant(config):
 
 
 def parse_config_file(path, config):
-    from conda_build.metadata import ns_cfg, select_lines
+    from conda_build.metadata import get_selectors, select_lines
 
     with open(path) as f:
         contents = f.read()
-    contents = select_lines(contents, ns_cfg(config), variants_in_place=False)
+    contents = select_lines(contents, get_selectors(config), variants_in_place=False)
     content = yaml.load(contents, Loader=yaml.loader.BaseLoader) or {}
     trim_empty_keys(content)
     return content
@@ -387,11 +392,10 @@ def _get_zip_keys(spec):
     zip_keys = spec.get("zip_keys")
     if not zip_keys:
         return set()
-    elif islist(zip_keys, uniform=lambda e: isinstance(e, string_types)):
+    elif islist(zip_keys, uniform=lambda e: isinstance(e, str)):
         return {frozenset(zip_keys)}
     elif islist(
-        zip_keys,
-        uniform=lambda e: islist(e, uniform=lambda e: isinstance(e, string_types)),
+        zip_keys, uniform=lambda e: islist(e, uniform=lambda e: isinstance(e, str))
     ):
         return {frozenset(zg) for zg in zip_keys}
 
@@ -485,7 +489,7 @@ def filter_by_key_value(variants, key, values, source_name):
     return reduced_variants
 
 
-@memoized
+@lru_cache(maxsize=None)
 def _split_str(string, char):
     return string.split(char)
 
@@ -689,7 +693,7 @@ def get_vars(variants, loop_only=False):
     return loop_vars
 
 
-@memoized
+@lru_cache(maxsize=None)
 def find_used_variables_in_text(variant, recipe_text, selectors_only=False):
     used_variables = set()
     recipe_lines = recipe_text.splitlines()

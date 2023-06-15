@@ -2,77 +2,88 @@
 # SPDX-License-Identifier: BSD-3-Clause
 import json
 import os
+import platform
 import re
 import sys
-from collections import OrderedDict
+from pathlib import Path
 
 import pytest
 import yaml
+from conda.common.compat import on_mac
 
-from conda_build import api, exceptions, variants
-from conda_build.utils import FileNotFoundError, package_has_file
+from conda_build import api, exceptions
+from conda_build.utils import ensure_list, package_has_file
+from conda_build.variants import (
+    combine_specs,
+    dict_of_lists_to_list_of_dicts,
+    get_package_variants,
+    validate_spec,
+)
 
-thisdir = os.path.dirname(__file__)
-recipe_dir = os.path.join(thisdir, "test-recipes", "variants")
+from .utils import variants_dir
 
 
-def test_later_spec_priority(single_version, no_numpy_version):
-    # override a single key
-    specs = OrderedDict()
-    specs["no_numpy"] = no_numpy_version
-    specs["single_ver"] = single_version
+@pytest.mark.parametrize(
+    "variants",
+    [
+        (["1.2", "3.4"], "5.6"),
+        ("1.2", ["3.4", "5.6"]),
+    ],
+)
+def test_spec_priority_overriding(variants):
+    name = "package"
 
-    combined_spec = variants.combine_specs(specs)
-    assert len(combined_spec) == 4
-    assert combined_spec["python"] == ["2.7.*"]
+    first, second = variants
+    ordered_specs = {
+        "first": {name: first},
+        "second": {name: second},
+    }
 
-    # keep keys that are not overwritten
-    specs = OrderedDict()
-    specs["single_ver"] = single_version
-    specs["no_numpy"] = no_numpy_version
-    combined_spec = variants.combine_specs(specs)
-    assert len(combined_spec) == 4
-    assert len(combined_spec["python"]) == 2
+    combined = combine_specs(ordered_specs)[name]
+    expected = ensure_list(second)
+    assert len(combined) == len(expected)
+    assert combined == expected
 
 
 def test_bad_combine_spec():
-    specs = OrderedDict()
-    specs["base"] = {
-        "foo": ["2.7", "3.7", "3.8"],
-        "zip_keys": [["bar", "baz"], ["qux", "quux", "quuz"]],
-        "bar": ["1", "2", "3"],
-        "baz": ["2", "4", "6"],
-        "qux": ["4", "5"],
-        "quux": ["8", "10"],
-        "quuz": ["12", "15"],
-        "dict": {
-            "value1": 1,
-            "value2": 4,
-            "value3": 6,
+    specs = {
+        "base": {
+            "foo": ["2.7", "3.7", "3.8"],
+            "zip_keys": [["bar", "baz"], ["qux", "quux", "quuz"]],
+            "bar": ["1", "2", "3"],
+            "baz": ["2", "4", "6"],
+            "qux": ["4", "5"],
+            "quux": ["8", "10"],
+            "quuz": ["12", "15"],
+            "dict": {
+                "value1": 1,
+                "value2": 4,
+                "value3": 6,
+            },
+            "extend_keys": ["corge"],
+            "corge": "42",
         },
-        "extend_keys": ["corge"],
-        "corge": "42",
+        "patch": {
+            "foo": ["3.7", "3.8"],  # clobbers, explode key - OK
+            "dict": {1: 1, 2: 2},  # clobbers, explode key - OK
+            "corge": "56",  # extends, passthru key - OK
+        },
     }
-    specs["patch"] = {
-        "foo": ["3.7", "3.8"],  # clobbers, explode key - OK
-        "dict": {1: 1, 2: 2},  # clobbers, explode key - OK
-        "corge": "56",  # extends, passthru key - OK
-    }
-    variants.combine_specs(specs)
+    combine_specs(specs)
 
     specs["patch"] = {
         "bad-char": "value",  # clobbers, explode key, bad key - FAIL
     }
-    with pytest.raises(ValueError) as e:
-        variants.combine_specs(specs)
-    assert "contains an invalid character" in str(e.value)
+    with pytest.raises(ValueError, match="contains an invalid character"):
+        combine_specs(specs)
 
     specs["patch"] = {
         "zip_keys": "9",  # extends, zip_keys, bad zip_keys - FAIL
     }
-    with pytest.raises(ValueError) as e:
-        variants.combine_specs(specs)
-    assert "expect list of string or list of lists of string" in str(e.value)
+    with pytest.raises(
+        ValueError, match="expect list of string or list of lists of string"
+    ):
+        combine_specs(specs)
 
     specs["patch"] = {
         "zip_keys": [
@@ -80,121 +91,108 @@ def test_bad_combine_spec():
             "bar",
         ],  # extends, zip_keys, missing key & duplicate key - FAIL
     }
-    with pytest.raises(ValueError) as e:
-        variants.combine_specs(specs)
-    assert "defined in the combined spec" in str(e.value)
-    assert "used multiple times in zip_keys" in str(e.value)
+    with pytest.raises(
+        ValueError,
+        match=r"defined in the combined spec.*used multiple times in zip_keys",
+    ):
+        combine_specs(specs)
 
     specs["patch"] = {
         "qux": ["4", "4", "4"],  # clobbers, explode key, bad length - FAIL
         "quux": ["8"],  # clobbers, explode key, bad length - FAIL
         "quuz": ["10"],  # clobbers, explode key, bad length - FAIL
     }
-    with pytest.raises(ValueError) as e:
-        variants.combine_specs(specs)
-    assert "same number of values" in str(e.value)
+    with pytest.raises(ValueError, match="same number of values"):
+        combine_specs(specs)
 
     specs["patch"] = {
         "qux": ["100"],  # filtering, explode key, undefined - FAIL
     }
-    with pytest.raises(ValueError) as e:
-        variants.combine_specs(specs)
-    assert "unimplemented subspace(s)" in str(e.value)
+    with pytest.raises(ValueError, match="unimplemented subspace(s)"):
+        combine_specs(specs)
 
 
-def test_get_package_variants_from_file(
-    testing_workdir, testing_config, no_numpy_version
-):
-    with open("variant_example.yaml", "w") as f:
-        yaml.dump(no_numpy_version, f, default_flow_style=False)
-    testing_config.variant_config_files = [
-        os.path.join(testing_workdir, "variant_example.yaml")
-    ]
+@pytest.mark.parametrize(
+    "as_yaml",
+    [
+        pytest.param(True, id="yaml"),
+        pytest.param(False, id="dict"),
+    ],
+)
+def test_python_variants(testing_workdir, testing_config, as_yaml):
+    """Python variants are treated differently in conda recipes. Instead of being pinned against a
+    specific version they are converted into version ranges. E.g.:
+
+    python 3.5 -> python >=3.5,<3.6.0a0
+    otherPackages 3.5 -> otherPackages 3.5
+    """
+    variants = {"python": ["3.10", "3.11"]}
     testing_config.ignore_system_config = True
+
+    # write variants to disk
+    if as_yaml:
+        variants_path = Path(testing_workdir, "variant_example.yaml")
+        variants_path.write_text(yaml.dump(variants, default_flow_style=False))
+        testing_config.variant_config_files = [str(variants_path)]
+
+    # render the metadata
     metadata = api.render(
-        os.path.join(thisdir, "variant_recipe"),
+        os.path.join(variants_dir, "variant_recipe"),
         no_download_source=False,
         config=testing_config,
+        # if variants were written to disk then don't pass it along
+        variants=None if as_yaml else variants,
     )
-    # one for each Python version.  Numpy is not strictly pinned and should present only 1 dimension
+
+    # we should have one package/metadata per python version
     assert len(metadata) == 2
-    assert (
-        sum(
-            "python >=2.7,<2.8" in req
-            for (m, _, _) in metadata
-            for req in m.meta["requirements"]["run"]
-        )
-        == 1
-    )
-    assert (
-        sum(
-            "python >=3.5,<3.6" in req
-            for (m, _, _) in metadata
-            for req in m.meta["requirements"]["run"]
-        )
-        == 1
-    )
+    # there should only be one run requirement for each package/metadata
+    assert len(metadata[0][0].meta["requirements"]["run"]) == 1
+    assert len(metadata[1][0].meta["requirements"]["run"]) == 1
+    # the run requirements should be python ranges
+    assert {
+        *metadata[0][0].meta["requirements"]["run"],
+        *metadata[1][0].meta["requirements"]["run"],
+    } == {"python >=3.10,<3.11.0a0", "python >=3.11,<3.12.0a0"}
 
 
 def test_use_selectors_in_variants(testing_workdir, testing_config):
     testing_config.variant_config_files = [
-        os.path.join(recipe_dir, "selector_conda_build_config.yaml")
+        os.path.join(variants_dir, "selector_conda_build_config.yaml")
     ]
-    variants.get_package_variants(testing_workdir, testing_config)
-
-
-def test_get_package_variants_from_dictionary_of_lists(
-    testing_config, no_numpy_version
-):
-    testing_config.ignore_system_config = True
-    metadata = api.render(
-        os.path.join(thisdir, "variant_recipe"),
-        no_download_source=False,
-        config=testing_config,
-        variants=no_numpy_version,
-    )
-    # one for each Python version.  Numpy is not strictly pinned and should present only 1 dimension
-    assert len(metadata) == 2, metadata
-    assert (
-        sum(
-            "python >=2.7,<2.8" in req
-            for (m, _, _) in metadata
-            for req in m.meta["requirements"]["run"]
-        )
-        == 1
-    )
-    assert (
-        sum(
-            "python >=3.5,<3.6" in req
-            for (m, _, _) in metadata
-            for req in m.meta["requirements"]["run"]
-        )
-        == 1
-    )
+    get_package_variants(testing_workdir, testing_config)
 
 
 @pytest.mark.xfail(
-    reason="Strange failure 7/19/2017.  Can't reproduce locally.  Test runs fine "
-    "with parallelism and everything.  Test fails reproducibly on CI, but logging "
-    "into appveyor after failed run, test passes.  =("
+    reason=(
+        "7/19/2017 Strange failure. Can't reproduce locally. Test runs fine "
+        "with parallelism and everything. Test fails reproducibly on CI, but logging "
+        "into appveyor after failed run, test passes."
+        "1/9/2023 ignore_version doesn't work as advertised."
+    )
 )
-def test_variant_with_ignore_numpy_version_reduces_matrix(numpy_version_ignored):
-    # variants are defined in yaml file in this folder
-    # there are two python versions and two numpy versions.  However, because numpy is not pinned,
-    #    the numpy dimensions should get collapsed.
-    recipe = os.path.join(recipe_dir, "03_numpy_matrix")
-    metadata = api.render(recipe, variants=numpy_version_ignored, finalize=False)
-    assert len(metadata) == 2, metadata
+def test_variant_with_ignore_version_reduces_matrix():
+    metadata = api.render(
+        os.path.join(variants_dir, "03_ignore_version_reduces_matrix"),
+        variants={
+            "packageA": ["1.2", "3.4"],
+            "packageB": ["5.6", "7.8"],
+            # packageB is ignored so that dimension should get collapsed
+            "ignore_version": "packageB",
+        },
+        finalize=False,
+    )
+    assert len(metadata) == 2
 
 
 def test_variant_with_numpy_pinned_has_matrix():
-    recipe = os.path.join(recipe_dir, "04_numpy_matrix_pinned")
+    recipe = os.path.join(variants_dir, "04_numpy_matrix_pinned")
     metadata = api.render(recipe, finalize=False)
     assert len(metadata) == 4
 
 
 def test_pinning_in_build_requirements():
-    recipe = os.path.join(recipe_dir, "05_compatible")
+    recipe = os.path.join(variants_dir, "05_compatible")
     metadata = api.render(recipe)[0][0]
     build_requirements = metadata.meta["requirements"]["build"]
     # make sure that everything in the build deps is exactly pinned
@@ -203,38 +201,38 @@ def test_pinning_in_build_requirements():
 
 @pytest.mark.sanity
 def test_no_satisfiable_variants_raises_error():
-    recipe = os.path.join(recipe_dir, "01_basic_templating")
+    recipe = os.path.join(variants_dir, "01_basic_templating")
     with pytest.raises(exceptions.DependencyNeedsBuildingError):
         api.render(recipe, permit_unsatisfiable_variants=False)
-
-    # the packages are not installable anyway, so this should show a warning that recipe can't
-    #   be finalized
     api.render(recipe, permit_unsatisfiable_variants=True)
-    # out, err = capsys.readouterr()
-    # print(out)
-    # print(err)
-    # print(caplog.text)
-    # assert "Returning non-final recipe; one or more dependencies was unsatisfiable" in err
 
 
 def test_zip_fields():
     """Zipping keys together allows people to tie different versions as sets of combinations."""
-    v = {"python": ["2.7", "3.5"], "vc": ["9", "14"], "zip_keys": [("python", "vc")]}
-    ld = variants.dict_of_lists_to_list_of_dicts(v)
-    assert len(ld) == 2
-    assert ld[0]["python"] == "2.7"
-    assert ld[0]["vc"] == "9"
-    assert ld[1]["python"] == "3.5"
-    assert ld[1]["vc"] == "14"
+    variants = {
+        "packageA": ["1.2", "3.4"],
+        "packageB": ["5", "6"],
+        "zip_keys": [("packageA", "packageB")],
+    }
+    zipped = dict_of_lists_to_list_of_dicts(variants)
+    assert len(zipped) == 2
+    assert zipped[0]["packageA"] == "1.2"
+    assert zipped[0]["packageB"] == "5"
+    assert zipped[1]["packageA"] == "3.4"
+    assert zipped[1]["packageB"] == "6"
 
     # allow duplication of values, but lengths of lists must always match
-    v = {"python": ["2.7", "2.7"], "vc": ["9", "14"], "zip_keys": [("python", "vc")]}
-    ld = variants.dict_of_lists_to_list_of_dicts(v)
-    assert len(ld) == 2
-    assert ld[0]["python"] == "2.7"
-    assert ld[0]["vc"] == "9"
-    assert ld[1]["python"] == "2.7"
-    assert ld[1]["vc"] == "14"
+    variants = {
+        "packageA": ["1.2", "1.2"],
+        "packageB": ["5", "6"],
+        "zip_keys": [("packageA", "packageB")],
+    }
+    zipped = dict_of_lists_to_list_of_dicts(variants)
+    assert len(zipped) == 2
+    assert zipped[0]["packageA"] == "1.2"
+    assert zipped[0]["packageB"] == "5"
+    assert zipped[1]["packageA"] == "1.2"
+    assert zipped[1]["packageB"] == "6"
 
 
 def test_validate_spec():
@@ -244,7 +242,7 @@ def test_validate_spec():
     """
     spec = {
         # normal expansions
-        "foo": [2.7, 3.7, 3.8],
+        "foo": [1.2, 3.4],
         # zip_keys are the values that need to be expanded as a set
         "zip_keys": [["bar", "baz"], ["qux", "quux", "quuz"]],
         "bar": [1, 2, 3],
@@ -257,37 +255,37 @@ def test_validate_spec():
         "corge": 42,
     }
     # valid spec
-    variants.validate_spec("spec", spec)
+    validate_spec("spec", spec)
 
     spec2 = dict(spec)
     spec2["bad-char"] = "bad-char"
     # invalid characters
     with pytest.raises(ValueError):
-        variants.validate_spec("spec[bad_char]", spec2)
+        validate_spec("spec[bad_char]", spec2)
 
     spec3 = dict(spec, zip_keys="bad_zip_keys")
     # bad zip_keys
     with pytest.raises(ValueError):
-        variants.validate_spec("spec[bad_zip_keys]", spec3)
+        validate_spec("spec[bad_zip_keys]", spec3)
 
     spec4 = dict(spec, zip_keys=[["bar", "baz"], ["qux", "quux"], ["quuz", "missing"]])
     # zip_keys' zip_group has key missing from spec
     with pytest.raises(ValueError):
-        variants.validate_spec("spec[missing_key]", spec4)
+        validate_spec("spec[missing_key]", spec4)
 
     spec5 = dict(spec, zip_keys=[["bar", "baz"], ["qux", "quux", "quuz"], ["quuz"]])
     # zip_keys' zip_group has duplicate key
     with pytest.raises(ValueError):
-        variants.validate_spec("spec[duplicate_key]", spec5)
+        validate_spec("spec[duplicate_key]", spec5)
 
     spec6 = dict(spec, baz=[4, 6])
     # zip_keys' zip_group key fields have same length
     with pytest.raises(ValueError):
-        variants.validate_spec("spec[duplicate_key]", spec6)
+        validate_spec("spec[duplicate_key]", spec6)
 
 
 def test_cross_compilers():
-    recipe = os.path.join(recipe_dir, "09_cross")
+    recipe = os.path.join(variants_dir, "09_cross")
     ms = api.render(
         recipe,
         permit_unsatisfiable_variants=True,
@@ -298,29 +296,25 @@ def test_cross_compilers():
 
 
 def test_variants_in_output_names():
-    recipe = os.path.join(recipe_dir, "11_variant_output_names")
+    recipe = os.path.join(variants_dir, "11_variant_output_names")
     outputs = api.get_output_file_paths(recipe)
     assert len(outputs) == 4
 
 
-def test_variants_in_versions_with_setup_py_data(testing_workdir):
-    recipe = os.path.join(recipe_dir, "12_variant_versions")
-    try:
-        outputs = api.get_output_file_paths(recipe)
-        assert len(outputs) == 2
-        assert any(
-            os.path.basename(pkg).startswith("my_package-470.470") for pkg in outputs
-        )
-        assert any(
-            os.path.basename(pkg).startswith("my_package-480.480") for pkg in outputs
-        )
-    except FileNotFoundError:
-        # problem with python 3.x with Travis CI somehow.  Just ignore it.
-        print("Ignoring test on setup.py data - problem with download")
+def test_variants_in_versions_with_setup_py_data():
+    recipe = os.path.join(variants_dir, "12_variant_versions")
+    outputs = api.get_output_file_paths(recipe)
+    assert len(outputs) == 2
+    assert any(
+        os.path.basename(pkg).startswith("my_package-470.470") for pkg in outputs
+    )
+    assert any(
+        os.path.basename(pkg).startswith("my_package-480.480") for pkg in outputs
+    )
 
 
-def test_git_variables_with_variants(testing_workdir, testing_config):
-    recipe = os.path.join(recipe_dir, "13_git_vars")
+def test_git_variables_with_variants(testing_config):
+    recipe = os.path.join(variants_dir, "13_git_vars")
     m = api.render(
         recipe, config=testing_config, finalize=False, bypass_env_check=True
     )[0][0]
@@ -337,17 +331,17 @@ def test_variant_input_with_zip_keys_keeps_zip_keys_list():
         "zip_keys": ["sqlite", "zlib", "xz"],
         "pin_run_as_build": {"python": {"min_pin": "x.x", "max_pin": "x.x"}},
     }
-    vrnts = variants.dict_of_lists_to_list_of_dicts(spec)
+    vrnts = dict_of_lists_to_list_of_dicts(spec)
     assert len(vrnts) == 2
     assert vrnts[0].get("zip_keys") == spec["zip_keys"]
 
 
 @pytest.mark.serial
 @pytest.mark.xfail(sys.platform == "win32", reason="console readout issues on appveyor")
-def test_ensure_valid_spec_on_run_and_test(testing_workdir, testing_config, caplog):
+def test_ensure_valid_spec_on_run_and_test(testing_config, caplog):
     testing_config.debug = True
     testing_config.verbose = True
-    recipe = os.path.join(recipe_dir, "14_variant_in_run_and_test")
+    recipe = os.path.join(variants_dir, "14_variant_in_run_and_test")
     api.render(recipe, config=testing_config)
 
     text = caplog.text
@@ -357,8 +351,12 @@ def test_ensure_valid_spec_on_run_and_test(testing_workdir, testing_config, capl
     assert "Adding .* to spec 'pytest-mock  1.6'" not in text
 
 
+@pytest.mark.skipif(
+    on_mac and platform.machine() == "arm64",
+    reason="Unsatisfiable dependencies for M1 MacOS: {'bzip2=1.0.6'}",
+)
 def test_serial_builds_have_independent_configs(testing_config):
-    recipe = os.path.join(recipe_dir, "17_multiple_recipes_independent_config")
+    recipe = os.path.join(variants_dir, "17_multiple_recipes_independent_config")
     recipes = [os.path.join(recipe, dirname) for dirname in ("a", "b")]
     outputs = api.build(recipes, config=testing_config)
     index_json = json.loads(package_has_file(outputs[0], "info/index.json"))
@@ -368,7 +366,7 @@ def test_serial_builds_have_independent_configs(testing_config):
 
 
 def test_subspace_selection(testing_config):
-    recipe = os.path.join(recipe_dir, "18_subspace_selection")
+    recipe = os.path.join(variants_dir, "18_subspace_selection")
     testing_config.variant = {"a": "coffee"}
     ms = api.render(
         recipe, config=testing_config, finalize=False, bypass_env_check=True
@@ -419,9 +417,9 @@ def test_subspace_selection(testing_config):
     assert ms[0][0].config.variant["c"] == "animal"
 
 
-def test_get_used_loop_vars(testing_config):
+def test_get_used_loop_vars():
     m = api.render(
-        os.path.join(recipe_dir, "19_used_variables"),
+        os.path.join(variants_dir, "19_used_variables"),
         finalize=False,
         bypass_env_check=True,
     )[0][0]
@@ -439,14 +437,14 @@ def test_get_used_loop_vars(testing_config):
     }
 
 
-def test_reprovisioning_source(testing_config):
-    api.render(os.path.join(recipe_dir, "20_reprovision_source"))
+def test_reprovisioning_source():
+    api.render(os.path.join(variants_dir, "20_reprovision_source"))
 
 
 def test_reduced_hashing_behavior(testing_config):
     # recipes using any compiler jinja2 function need a hash
     m = api.render(
-        os.path.join(recipe_dir, "26_reduced_hashing", "hash_yes_compiler"),
+        os.path.join(variants_dir, "26_reduced_hashing", "hash_yes_compiler"),
         finalize=False,
         bypass_env_check=True,
     )[0][0]
@@ -462,7 +460,7 @@ def test_reduced_hashing_behavior(testing_config):
     #     python, r_base, and the other stuff covered by legacy build string
     #     behavior)
     m = api.render(
-        os.path.join(recipe_dir, "26_reduced_hashing", "hash_yes_pinned"),
+        os.path.join(variants_dir, "26_reduced_hashing", "hash_yes_pinned"),
         finalize=False,
         bypass_env_check=True,
     )[0][0]
@@ -471,7 +469,7 @@ def test_reduced_hashing_behavior(testing_config):
 
     # anything else does not get a hash
     m = api.render(
-        os.path.join(recipe_dir, "26_reduced_hashing", "hash_no_python"),
+        os.path.join(variants_dir, "26_reduced_hashing", "hash_no_python"),
         finalize=False,
         bypass_env_check=True,
     )[0][0]
@@ -479,9 +477,9 @@ def test_reduced_hashing_behavior(testing_config):
     assert not re.search("h[0-9a-f]{%d}" % testing_config.hash_length, m.build_id())
 
 
-def test_variants_used_in_jinja2_conditionals(testing_config):
+def test_variants_used_in_jinja2_conditionals():
     ms = api.render(
-        os.path.join(recipe_dir, "21_conditional_sections"),
+        os.path.join(variants_dir, "21_conditional_sections"),
         finalize=False,
         bypass_env_check=True,
     )
@@ -490,19 +488,19 @@ def test_variants_used_in_jinja2_conditionals(testing_config):
     assert sum(m.config.variant["blas_impl"] == "openblas" for m, _, _ in ms) == 1
 
 
-def test_build_run_exports_act_on_host(testing_config, caplog):
+def test_build_run_exports_act_on_host(caplog):
     """Regression test for https://github.com/conda/conda-build/issues/2559"""
     api.render(
-        os.path.join(recipe_dir, "22_run_exports_rerendered_for_other_variants"),
+        os.path.join(variants_dir, "22_run_exports_rerendered_for_other_variants"),
         platform="win",
         arch="64",
     )
     assert "failed to get install actions, retrying" not in caplog.text
 
 
-def test_detect_variables_in_build_and_output_scripts(testing_config):
+def test_detect_variables_in_build_and_output_scripts():
     ms = api.render(
-        os.path.join(recipe_dir, "24_test_used_vars_in_scripts"),
+        os.path.join(variants_dir, "24_test_used_vars_in_scripts"),
         platform="linux",
         arch="64",
     )
@@ -527,7 +525,7 @@ def test_detect_variables_in_build_and_output_scripts(testing_config):
             assert "OUTPUT_VAR" in used_vars
     # on windows, we find variables in bat scripts as well as shell scripts
     ms = api.render(
-        os.path.join(recipe_dir, "24_test_used_vars_in_scripts"),
+        os.path.join(variants_dir, "24_test_used_vars_in_scripts"),
         platform="win",
         arch="64",
     )
@@ -553,21 +551,21 @@ def test_detect_variables_in_build_and_output_scripts(testing_config):
             assert "OUTPUT_VAR" in used_vars
 
 
-def test_target_platform_looping(testing_config):
+def test_target_platform_looping():
     outputs = api.get_output_file_paths(
-        os.path.join(recipe_dir, "25_target_platform_looping"),
+        os.path.join(variants_dir, "25_target_platform_looping"),
         platform="win",
         arch="64",
     )
     assert len(outputs) == 2
 
 
-def test_numpy_used_variable_looping(testing_config):
-    outputs = api.get_output_file_paths(os.path.join(recipe_dir, "numpy_used"))
+def test_numpy_used_variable_looping():
+    outputs = api.get_output_file_paths(os.path.join(variants_dir, "numpy_used"))
     assert len(outputs) == 4
 
 
-def test_exclusive_config_files(testing_workdir):
+def test_exclusive_config_files():
     with open("conda_build_config.yaml", "w") as f:
         yaml.dump({"abc": ["someval"], "cwd": ["someval"]}, f, default_flow_style=False)
     os.makedirs("config_dir")
@@ -588,7 +586,7 @@ def test_exclusive_config_files(testing_workdir):
         os.path.join("config_dir", "config-1.yaml"),
     )
     output = api.render(
-        os.path.join(recipe_dir, "exclusive_config_file"),
+        os.path.join(variants_dir, "exclusive_config_file"),
         exclusive_config_files=exclusive_config_files,
     )[0][0]
     variant = output.config.variant
@@ -604,7 +602,7 @@ def test_exclusive_config_files(testing_workdir):
     assert variant["abc"] == "123"
 
 
-def test_exclusive_config_file(testing_workdir):
+def test_exclusive_config_file():
     with open("conda_build_config.yaml", "w") as f:
         yaml.dump({"abc": ["someval"], "cwd": ["someval"]}, f, default_flow_style=False)
     os.makedirs("config_dir")
@@ -613,7 +611,7 @@ def test_exclusive_config_file(testing_workdir):
             {"abc": ["super"], "exclusive": ["someval"]}, f, default_flow_style=False
         )
     output = api.render(
-        os.path.join(recipe_dir, "exclusive_config_file"),
+        os.path.join(variants_dir, "exclusive_config_file"),
         exclusive_config_file=os.path.join("config_dir", "config.yaml"),
     )[0][0]
     variant = output.config.variant
@@ -626,9 +624,13 @@ def test_exclusive_config_file(testing_workdir):
     assert variant["abc"] == "123"
 
 
+@pytest.mark.skipif(
+    on_mac and platform.machine() == "arm64",
+    reason="M1 Mac-specific file system error related to this test",
+)
 def test_inner_python_loop_with_output(testing_config):
     outputs = api.get_output_file_paths(
-        os.path.join(recipe_dir, "test_python_as_subpackage_loop"),
+        os.path.join(variants_dir, "test_python_as_subpackage_loop"),
         config=testing_config,
     )
     outputs = [os.path.basename(out) for out in outputs]
@@ -639,11 +641,11 @@ def test_inner_python_loop_with_output(testing_config):
 
     testing_config.variant_config_files = [
         os.path.join(
-            recipe_dir, "test_python_as_subpackage_loop", "config_with_zip.yaml"
+            variants_dir, "test_python_as_subpackage_loop", "config_with_zip.yaml"
         )
     ]
     outputs = api.get_output_file_paths(
-        os.path.join(recipe_dir, "test_python_as_subpackage_loop"),
+        os.path.join(variants_dir, "test_python_as_subpackage_loop"),
         config=testing_config,
     )
     outputs = [os.path.basename(out) for out in outputs]
@@ -654,11 +656,11 @@ def test_inner_python_loop_with_output(testing_config):
 
     testing_config.variant_config_files = [
         os.path.join(
-            recipe_dir, "test_python_as_subpackage_loop", "config_with_zip.yaml"
+            variants_dir, "test_python_as_subpackage_loop", "config_with_zip.yaml"
         )
     ]
     outputs = api.get_output_file_paths(
-        os.path.join(recipe_dir, "test_python_as_subpackage_loop"),
+        os.path.join(variants_dir, "test_python_as_subpackage_loop"),
         config=testing_config,
         platform="win",
         arch=64,
@@ -672,13 +674,13 @@ def test_inner_python_loop_with_output(testing_config):
 
 def test_variant_as_dependency_name(testing_config):
     outputs = api.render(
-        os.path.join(recipe_dir, "27_requirements_host"), config=testing_config
+        os.path.join(variants_dir, "27_requirements_host"), config=testing_config
     )
     assert len(outputs) == 2
 
 
 def test_custom_compiler():
-    recipe = os.path.join(recipe_dir, "28_custom_compiler")
+    recipe = os.path.join(variants_dir, "28_custom_compiler")
     ms = api.render(
         recipe,
         permit_unsatisfiable_variants=True,
@@ -689,7 +691,7 @@ def test_custom_compiler():
 
 
 def test_different_git_vars():
-    recipe = os.path.join(recipe_dir, "29_different_git_vars")
+    recipe = os.path.join(variants_dir, "29_different_git_vars")
     ms = api.render(recipe)
     versions = [m[0].version() for m in ms]
     assert "1.20.0" in versions
@@ -701,15 +703,15 @@ def test_different_git_vars():
 )
 def test_top_level_finalized(testing_config):
     # see https://github.com/conda/conda-build/issues/3618
-    recipe = os.path.join(recipe_dir, "30_top_level_finalized")
+    recipe = os.path.join(variants_dir, "30_top_level_finalized")
     outputs = api.build(recipe, config=testing_config)
     xzcat_output = package_has_file(outputs[0], "xzcat_output")
     assert "5.2.3" in xzcat_output
 
 
-def test_variant_subkeys_retained(testing_config):
+def test_variant_subkeys_retained():
     m = api.render(
-        os.path.join(recipe_dir, "31_variant_subkeys"),
+        os.path.join(variants_dir, "31_variant_subkeys"),
         finalize=False,
         bypass_env_check=True,
     )[0][0]
