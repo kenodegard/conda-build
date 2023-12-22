@@ -871,15 +871,18 @@ class Config:
                 rm_rf(os.path.join(self.build_folder, "prefix_files"))
         else:
             print(
-                "\nLeaving build/test directories:\n  Work:\n",
-                self.work_dir,
-                "\n  Test:\n",
-                self.test_dir,
-                "\nLeaving build/test environments:\n  Test:\nsource activate ",
-                self.test_prefix,
-                "\n  Build:\nsource activate ",
-                self.build_prefix,
-                "\n\n",
+                f"\n"
+                f"Leaving build/test directories:\n"
+                f"  Work:\n"
+                f"    {self.work_dir}\n"
+                f"  Test:\n"
+                f"    {self.test_dir}\n"
+                f"Leaving build/test environments:\n"
+                f"  Test:\n"
+                f"    conda activate --prefix='{self.test_prefix}'\n"
+                f"  Build:\n"
+                f"    conda activate --prefix='{self.build_prefix}'\n"
+                f"\n",
             )
 
         for lock in get_conda_operation_locks(self.locking, self.bldpkgs_dirs):
