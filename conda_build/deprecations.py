@@ -381,4 +381,4 @@ class DeprecationHandler:
         )
 
 
-deprecated = DeprecationHandler(__version__)
+deprecated = DeprecationHandler("24.5.0" or __version__)
