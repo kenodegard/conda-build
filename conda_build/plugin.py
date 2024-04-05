@@ -6,6 +6,8 @@ from typing import TYPE_CHECKING
 
 import conda.plugins
 
+from .cli.main_build import configure_parser as configure_build
+from .cli.main_build import plugin_execute as build
 from .cli.main_render import configure_parser as configure_render
 from .cli.main_render import plugin_execute as render
 
@@ -14,10 +16,6 @@ if TYPE_CHECKING:
 
 
 # lazy-import to avoid nasty import-time side effects when not using conda-build
-def build(args: Sequence[str]) -> int:
-    from .cli.main_build import execute
-
-    return execute(args)
 
 
 def convert(args: Sequence[str]) -> int:
@@ -62,6 +60,7 @@ def conda_subcommands():
         name="build",
         summary="Build conda packages from a conda recipe.",
         action=build,
+        configure_parser=configure_build,
     )
     yield conda.plugins.CondaSubcommand(
         name="convert",

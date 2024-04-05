@@ -9,7 +9,7 @@ source:
 build:
   script: {{ PYTHON }} -m pip install . --no-deps --no-build-isolation -vv
   entry_points:
-    - conda-build = conda_build.cli.main_build:execute
+    - conda-build = conda_build.cli.main_build:main
     - conda-convert = conda_build.cli.main_convert:execute
     - conda-debug = conda_build.cli.main_debug:execute
     - conda-develop = conda_build.cli.main_develop:execute
