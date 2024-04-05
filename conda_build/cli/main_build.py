@@ -14,15 +14,14 @@ from typing import TYPE_CHECKING
 from ..deprecations import deprecated
 
 if TYPE_CHECKING:
-    from argparse import ArgumentParser, Namespace, _SubParserAction
+    from argparse import ArgumentParser, Namespace
     from typing import Iterable, Sequence
 
     from ..config import Config
 
 
-def configure_parser(sub_parsers: _SubParserAction | None, **kwargs) -> ArgumentParser:
+def configure_parser(parser: ArgumentParser | None, **kwargs) -> ArgumentParser:
     from conda.base.context import context
-    from conda.cli.helpers import add_parser_channels
 
     from ..config import zstd_compression_level_default
     from .actions import KeyValueAction
@@ -36,21 +35,18 @@ def configure_parser(sub_parsers: _SubParserAction | None, **kwargs) -> Argument
         "different sets of packages."
     )
 
-    if sub_parsers is None:
+    if parser is None:
         from conda.cli.conda_argparse import ArgumentParser
 
         parser = ArgumentParser(
             prog="conda build",
             description=description,
-            conflict_handler="resolve",
         )
     else:
-        parser = sub_parsers.add_parser(
-            "build",
-            help=description,
-            **kwargs,
-        )
+        parser.description = description
+
     add_parser_render(parser)
+
     parser.add_argument(
         "--check",
         action="store_true",
@@ -110,7 +106,7 @@ def configure_parser(sub_parsers: _SubParserAction | None, **kwargs) -> Argument
         help="Run the post-build logic. Implies --no-anaconda-upload.",
     )
     parser.add_argument(
-        "-p",
+        # "-p",
         "--test-run-post",
         action="store_true",
         help="Run the post-build logic during testing.",
@@ -485,8 +481,6 @@ def configure_parser(sub_parsers: _SubParserAction | None, **kwargs) -> Argument
             "Do not display value of environment variables specified in build.script_env."
         ),
     )
-
-    add_parser_channels(parser)
 
     return parser
 

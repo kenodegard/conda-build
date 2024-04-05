@@ -13,7 +13,7 @@ from yaml.parser import ParserError
 from ..deprecations import deprecated
 
 if TYPE_CHECKING:
-    from argparse import ArgumentParser, Namespace, _SubParserAction
+    from argparse import ArgumentParser, Namespace
     from typing import Sequence
 
 log = logging.getLogger(__name__)
@@ -172,7 +172,7 @@ def add_parser_render(parser: ArgumentParser) -> None:
 
 
 def _get_render_parser(
-    sub_parsers: _SubParserAction | None,
+    parser: ArgumentParser | None = None,
     **kwargs,
 ) -> ArgumentParser:
     description = (
@@ -182,29 +182,26 @@ def _get_render_parser(
         "environment information to generate the rendered meta.yml files."
     )
 
-    if sub_parsers is None:
+    if parser is None:
         from conda.cli.conda_argparse import ArgumentParser
 
         parser = ArgumentParser(
             prog="conda render",
             description=description,
-            conflict_handler="resolve",
         )
     else:
-        parser = sub_parsers.add_parser(
-            "render",
-            help=description,
-            **kwargs,
-        )
+        parser.description = description
+
     add_parser_render(parser)
+
     return parser
 
 
 deprecated.constant("24.5", "24.7", "get_render_parser", _get_render_parser)
 
 
-def configure_parser(sub_parsers: _SubParserAction | None, **kwargs) -> ArgumentParser:
-    parser = _get_render_parser(sub_parsers, **kwargs)
+def configure_parser(parser: ArgumentParser | None, **kwargs) -> ArgumentParser:
+    parser = _get_render_parser(parser, **kwargs)
 
     parser.add_argument(
         "-f",
