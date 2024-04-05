@@ -6,6 +6,9 @@ from typing import TYPE_CHECKING
 
 import conda.plugins
 
+from .cli.main_render import configure_parser as configure_render
+from .cli.main_render import plugin_execute as render
+
 if TYPE_CHECKING:
     from typing import Sequence
 
@@ -43,12 +46,6 @@ def inspect(args: Sequence[str]) -> int:
 
 def metapackage(args: Sequence[str]) -> int:
     from .cli.main_metapackage import execute
-
-    return execute(args)
-
-
-def render(args: Sequence[str]) -> int:
-    from .cli.main_render import execute
 
     return execute(args)
 
@@ -98,6 +95,7 @@ def conda_subcommands():
         name="render",
         summary="Expand a conda recipe into a platform-specific recipe.",
         action=render,
+        configure_parser=configure_render,
     )
     yield conda.plugins.CondaSubcommand(
         name="skeleton",

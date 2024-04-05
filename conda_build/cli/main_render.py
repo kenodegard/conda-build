@@ -10,14 +10,10 @@ from typing import TYPE_CHECKING
 import yaml
 from yaml.parser import ParserError
 
-from .. import __version__, api
-from ..conda_interface import ArgumentParser, add_parser_channels, cc_conda_build
-from ..config import get_channel_urls, get_or_merge_config
-from ..utils import LoggingContext
-from ..variants import get_package_variants, set_language_env_vars
+from ..deprecations import deprecated
 
 if TYPE_CHECKING:
-    from argparse import Namespace
+    from argparse import ArgumentParser, Namespace, _SubParserAction
     from typing import Sequence
 
 log = logging.getLogger(__name__)
@@ -43,102 +39,110 @@ class ParseYAMLArgument(argparse.Action):
             )
 
 
-def get_render_parser():
-    p = ArgumentParser(
-        prog="conda render",
-        description="""
-Tool for expanding the template meta.yml file (containing Jinja syntax and
-selectors) into the rendered meta.yml files. The template meta.yml file is
-combined with user-specified configurations, static recipe files, and
-environment information to generate the rendered meta.yml files.""",
-        conflict_handler="resolve",
-    )
-    p.add_argument(
+def add_parser_render(parser: ArgumentParser) -> None:
+    from conda.base.context import context
+    from conda.cli.helpers import add_parser_channels
+
+    from .. import __version__
+
+    parser.add_argument(
         "-V",
         "--version",
         action="version",
         help="Show the conda-build version number and exit.",
         version="conda-build %s" % __version__,
     )
-    p.add_argument(
+    parser.add_argument(
         "-n",
         "--no-source",
         action="store_true",
-        help="When templating can't be completed, do not obtain the \
-source to try fill in related template variables.",
+        help=(
+            "When templating can't be completed, do not obtain the "
+            "source to try fill in related template variables."
+        ),
     )
-    p.add_argument(
+    parser.add_argument(
         "--output",
         action="store_true",
         help="Output the conda package filename which would have been created",
     )
-    p.add_argument(
+    parser.add_argument(
         "--python",
         action="append",
         help="Set the Python version used by conda build.",
     )
-    p.add_argument(
+    parser.add_argument(
         "--perl",
         action="append",
         help="Set the Perl version used by conda build.",
     )
-    p.add_argument(
+    parser.add_argument(
         "--numpy",
         action="append",
         help="Set the NumPy version used by conda build.",
     )
-    p.add_argument(
+    parser.add_argument(
         "--R",
         action="append",
-        help="""Set the R version used by conda build.""",
+        help="Set the R version used by conda build.",
         dest="r_base",
     )
-    p.add_argument(
+    parser.add_argument(
         "--lua",
         action="append",
         help="Set the Lua version used by conda build.",
     )
-    p.add_argument(
+    parser.add_argument(
         "--bootstrap",
-        help="""Provide initial configuration in addition to recipe.
-        Can be a path to or name of an environment, which will be emulated
-        in the package.""",
+        help=(
+            "Provide initial configuration in addition to recipe. "
+            "Can be a path to or name of an environment, which will be emulated "
+            "in the package."
+        ),
     )
-    p.add_argument(
+    parser.add_argument(
         "--append-file",
-        help="""Append data in meta.yaml with fields from this file.  Jinja2 is not done
-        on appended fields""",
+        help=(
+            "Append data in meta.yaml with fields from this file.  Jinja2 is not done "
+            "on appended fields"
+        ),
         dest="append_sections_file",
     )
-    p.add_argument(
+    parser.add_argument(
         "--clobber-file",
-        help="""Clobber data in meta.yaml with fields from this file.  Jinja2 is not done
-        on clobbered fields.""",
+        help=(
+            "Clobber data in meta.yaml with fields from this file.  Jinja2 is not done "
+            "on clobbered fields."
+        ),
         dest="clobber_sections_file",
     )
-    p.add_argument(
+    parser.add_argument(
         "-m",
         "--variant-config-files",
         action="append",
-        help="""Additional variant config files to add.  These yaml files can contain
-        keys such as `c_compiler` and `target_platform` to form a build matrix.""",
+        help=(
+            "Additional variant config files to add.  These yaml files can contain "
+            "keys such as `c_compiler` and `target_platform` to form a build matrix."
+        ),
     )
-    p.add_argument(
+    parser.add_argument(
         "-e",
         "--exclusive-config-files",
         "--exclusive-config-file",
         action="append",
-        help="""Exclusive variant config files to add. Providing files here disables
-        searching in your home directory and in cwd.  The files specified here come at the
-        start of the order, as opposed to the end with --variant-config-files.  Any config
-        files in recipes and any config files specified with --variant-config-files will
-        override values from these files.""",
+        help=(
+            "Exclusive variant config files to add. Providing files here disables "
+            "searching in your home directory and in cwd.  The files specified here come at the "
+            "start of the order, as opposed to the end with --variant-config-files.  Any config "
+            "files in recipes and any config files specified with --variant-config-files will "
+            "override values from these files."
+        ),
     )
-    p.add_argument(
+    parser.add_argument(
         "--old-build-string",
         dest="filename_hashing",
         action="store_false",
-        default=cc_conda_build.get("filename_hashing", "true").lower() == "true",
+        default=context.conda_build.get("filename_hashing", "true").lower() == "true",
         help=(
             "Disable hash additions to filenames to distinguish package "
             "variants from one another. NOTE: any filename collisions are "
@@ -146,7 +150,7 @@ source to try fill in related template variables.",
             "build will clobber each other."
         ),
     )
-    p.add_argument(
+    parser.add_argument(
         "--use-channeldata",
         action="store_true",
         dest="use_channeldata",
@@ -155,7 +159,7 @@ source to try fill in related template variables.",
             "are downloaded to determine this information"
         ),
     )
-    p.add_argument(
+    parser.add_argument(
         "--variants",
         nargs=1,
         action=ParseYAMLArgument,
@@ -164,12 +168,44 @@ source to try fill in related template variables.",
             'such as "{python: [3.8, 3.9]}"'
         ),
     )
-    add_parser_channels(p)
-    return p
+    add_parser_channels(parser)
 
 
-def parse_args(args: Sequence[str] | None) -> tuple[ArgumentParser, Namespace]:
-    parser = get_render_parser()
+def _get_render_parser(
+    sub_parsers: _SubParserAction | None,
+    **kwargs,
+) -> ArgumentParser:
+    description = (
+        "Tool for expanding the template meta.yml file (containing Jinja syntax and "
+        "selectors) into the rendered meta.yml files. The template meta.yml file is "
+        "combined with user-specified configurations, static recipe files, and "
+        "environment information to generate the rendered meta.yml files."
+    )
+
+    if sub_parsers is None:
+        from conda.cli.conda_argparse import ArgumentParser
+
+        parser = ArgumentParser(
+            prog="conda render",
+            description=description,
+            conflict_handler="resolve",
+        )
+    else:
+        parser = sub_parsers.add_parser(
+            "render",
+            help=description,
+            **kwargs,
+        )
+    add_parser_render(parser)
+    return parser
+
+
+deprecated.constant("24.5", "24.7", "get_render_parser", _get_render_parser)
+
+
+def configure_parser(sub_parsers: _SubParserAction | None, **kwargs) -> ArgumentParser:
+    parser = _get_render_parser(sub_parsers, **kwargs)
+
     parser.add_argument(
         "-f",
         "--file",
@@ -189,16 +225,30 @@ def parse_args(args: Sequence[str] | None) -> tuple[ArgumentParser, Namespace]:
         help="Enable verbose output from download tools and progress updates",
     )
 
-    return parser, parser.parse_args(args)
+    return parser
 
 
-def execute(args: Sequence[str] | None = None) -> int:
-    _, parsed = parse_args(args)
+@deprecated(
+    "24.5",
+    "24.7",
+    addendum="Use `conda_build.cli.main_render.configure_parser` instead.",
+)
+def parse_args(args: Sequence[str] | None) -> tuple[ArgumentParser, Namespace]:
+    parser = configure_parser(None)
+    parsed = parser.parse_args(args)
+    return parser, parsed
+
+
+def plugin_execute(parsed: Namespace) -> int:
+    from .. import api
+    from ..build import get_all_replacements
+    from ..config import get_channel_urls, get_or_merge_config
+    from ..utils import LoggingContext
+    from ..variants import get_package_variants, set_language_env_vars
 
     config = get_or_merge_config(None, **parsed.__dict__)
 
     variants = get_package_variants(parsed.recipe, config, variants=parsed.variants)
-    from ..build import get_all_replacements
 
     get_all_replacements(variants)
     set_language_env_vars(variants)
@@ -244,3 +294,13 @@ def execute(args: Sequence[str] | None = None) -> int:
             print(api.output_yaml(m, parsed.file, suppress_outputs=True))
 
     return 0
+
+
+def main(args: Sequence[str] | None = None) -> int:
+    """For conda-render entrypoint. See conda_build.plugin for plugins."""
+    parser = configure_parser(None)
+    parsed = parser.parse_args(args)
+    return plugin_execute(parsed)
+
+
+deprecated.constant("24.5", "24.7", "execute", main)
